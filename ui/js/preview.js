@@ -13,6 +13,8 @@
       // Cancel any pending request and start a debounced one.
       if (this._debounceTimer) clearTimeout(this._debounceTimer);
       if (this._spinnerTimer) clearTimeout(this._spinnerTimer);
+      // Cancel in-flight PDF render (if any) when switching files.
+      if (global.QF && QF.PreviewPDF) QF.PreviewPDF.cancelCurrent();
       const seq = ++this._seq;
       if (!path) { this.renderEmpty(); return; }
       this._debounceTimer = setTimeout(() => this._loadNow(path, seq), 200);
@@ -72,6 +74,51 @@
           html += `<h5 class="mb-2">${fileIcon} ${QF.escapeHtml(name)}</h5>`;
           html += `<div class="alert alert-warning">文件大小：${QF.formatBytes(p.size)}，超过预览限制（20MB）。</div>`;
           break;
+        case "spreadsheet": {
+          html += `<h5 class="mb-2">${fileIcon} ${QF.escapeHtml(name)}</h5>`;
+          html += renderSpreadsheetSummary(p);
+          html += renderSpreadsheetTable(p);
+          break;
+        }
+        case "pdf": {
+          html += `<h5 class="mb-2">${fileIcon} ${QF.escapeHtml(name)}</h5>`;
+          html += `<div class="text-muted small mb-2">大小：${QF.formatBytes(p.size)}</div>`;
+          html += `<div class="qf-pdf-host"></div>`;
+          this.el.innerHTML = html;
+          QF.PreviewPDF.render(this.el.querySelector('.qf-pdf-host'),
+                               QF.convertFileSrc(p.path));
+          return;
+        }
+        case "docx": {
+          html += `<h5 class="mb-2">${fileIcon} ${QF.escapeHtml(name)}</h5>`;
+          html += `<div class="text-muted small mb-2">大小：${QF.formatBytes(p.size)}</div>`;
+          html += `<div class="qf-docx-host"></div>`;
+          this.el.innerHTML = html;
+          QF.PreviewDocx.render(this.el.querySelector('.qf-docx-host'),
+                                QF.convertFileSrc(p.path));
+          return;
+        }
+        case "pptx": {
+          html += `<h5 class="mb-2">${fileIcon} ${QF.escapeHtml(name)}</h5>`;
+          html += `<div class="text-muted small mb-2">大小：${QF.formatBytes(p.size)}（已转换为 PDF 进行预览）</div>`;
+          html += `<div class="qf-pdf-host"></div>`;
+          this.el.innerHTML = html;
+          QF.PreviewPDF.render(this.el.querySelector('.qf-pdf-host'),
+                               QF.convertFileSrc(p.pdfPath));
+          return;
+        }
+        case "officeImage": {
+          const src = QF.convertFileSrc(p.imagePath);
+          html += `<h5 class="mb-2">${fileIcon} ${QF.escapeHtml(name)}</h5>`;
+          html += `<div class="text-muted small mb-2">大小：${QF.formatBytes(p.size)} · 渲染引擎：${QF.escapeHtml(p.engine)}（仅首页缩略图）</div>`;
+          html += `<img class="qf-image" src="${src}" alt="preview" />`;
+          break;
+        }
+        case "unsupported":
+          html += `<h5 class="mb-2">${fileIcon} ${QF.escapeHtml(name)}</h5>`;
+          html += `<div class="text-muted small mb-2">大小：${QF.formatBytes(p.size)}</div>`;
+          html += `<div class="qf-preview-warn">${QF.escapeHtml(p.reason)}</div>`;
+          break;
         case "other":
           html += `<h5 class="mb-2">${fileIcon} ${QF.escapeHtml(name)}</h5>`;
           html += `<div>文件大小：${QF.formatBytes(p.size)}</div>`;
@@ -100,6 +147,47 @@
     if (!p) return "";
     const idx = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
     return idx >= 0 ? p.slice(idx + 1) : p;
+  }
+
+  function renderSpreadsheetSummary(p) {
+    const parts = [
+      `工作表：<strong>${QF.escapeHtml(p.sheetName)}</strong>`,
+      `共 ${p.totalRows} 行 × ${p.totalCols} 列`,
+    ];
+    if (p.otherSheets && p.otherSheets.length) {
+      parts.push(`其它工作表：${p.otherSheets.map(QF.escapeHtml).join('、')}`);
+    }
+    const truncs = [];
+    if (p.truncatedRows) truncs.push(`仅显示前 100 行`);
+    if (p.truncatedCols) truncs.push(`仅显示前 20 列`);
+    let html = `<div class="qf-sheet-summary">${parts.join('　·　')}</div>`;
+    if (truncs.length) {
+      html += `<div class="qf-sheet-summary qf-sheet-trunc">${truncs.join('，')}</div>`;
+    }
+    return html;
+  }
+
+  function renderSpreadsheetTable(p) {
+    let html = '<div class="qf-sheet-wrap"><table class="qf-sheet">';
+    if (p.headers && p.headers.length) {
+      html += '<thead><tr>';
+      for (const h of p.headers) {
+        const v = QF.escapeHtml(h);
+        html += `<th title="${v}">${v}</th>`;
+      }
+      html += '</tr></thead>';
+    }
+    html += '<tbody>';
+    for (const row of p.rows) {
+      html += '<tr>';
+      for (const cell of row) {
+        const v = QF.escapeHtml(cell);
+        html += `<td title="${v}">${v}</td>`;
+      }
+      html += '</tr>';
+    }
+    html += '</tbody></table></div>';
+    return html;
   }
 
   global.PreviewPane = PreviewPane;
