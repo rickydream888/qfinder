@@ -2,6 +2,26 @@
 name = "qfinder"
 version = "0.1.0"
 edition = "2024"
+description = "qfinder - 一个轻量级的本地文件浏览与预览工具"
+authors = ["qfinder"]
+license = "MIT"
+
+[package.metadata.bundle]
+name = "qfinder"
+identifier = "com.qfinder.app"
+icon = [
+    "icons/32x32.png",
+    "icons/128x128.png",
+    "icons/128x128@2x.png",
+    "icons/icon.icns",
+    "icons/icon.png",
+]
+version = "0.1.0"
+copyright = "Copyright (c) 2026 qfinder"
+category = "public.app-category.utilities"
+short_description = "本地文件浏览与预览工具"
+long_description = "qfinder 是一款基于 Tauri + Rust 构建的轻量级本地文件浏览与预览工具。"
+osx_minimum_system_version = "10.13"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
