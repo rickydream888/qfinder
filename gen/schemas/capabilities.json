@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"default capability for qfinder","local":true,"windows":["main"],"permissions":["core:default","core:window:default","core:event:default","core:webview:default","core:path:default","core:app:default","core:resources:default","core:image:default","core:menu:default","core:tray:default"]}}

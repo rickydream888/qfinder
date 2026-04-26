@@ -1,0 +1,7 @@
+/target
+/resources
+
+.DS_Store
+.localized
+Thumbs.db
+Desktop.ini

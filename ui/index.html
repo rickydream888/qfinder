@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-cn">
+<head>
+  <meta charset="UTF-8" />
+  <title>qfinder</title>
+  <link rel="stylesheet" href="css/bootstrap.min.css" />
+  <link rel="stylesheet" href="icons/bootstrap-icons.min.css" />
+  <link rel="stylesheet" href="css/app.css" />
+</head>
+<body>
+  <div id="topbar" class="d-flex align-items-center justify-content-between px-3 py-2 border-bottom">
+    <div>
+      <button id="mode-toggle" type="button" class="btn btn-outline-primary btn-sm">
+        切换到预览模式
+      </button>
+    </div>
+    <div id="task-area" class="text-muted small">
+      <span class="text-secondary">无后台任务</span>
+    </div>
+  </div>
+
+  <div id="body" class="qf-body">
+    <!-- Manage mode: dual trees -->
+    <div id="pane-manage" class="qf-pane qf-pane-manage">
+      <div class="qf-tree-container" data-tree-id="left"></div>
+      <div class="qf-divider"></div>
+      <div class="qf-tree-container" data-tree-id="right"></div>
+    </div>
+    <!-- Preview mode: tree + preview -->
+    <div id="pane-preview" class="qf-pane qf-pane-preview d-none">
+      <div class="qf-tree-container" data-tree-id="single"></div>
+      <div class="qf-divider"></div>
+      <div id="preview-pane" class="qf-preview"></div>
+    </div>
+  </div>
+
+  <!-- Generic dialog -->
+  <div class="modal fade" id="qf-dialog" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="qf-dialog-title">提示</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+        </div>
+        <div class="modal-body" id="qf-dialog-body"></div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-primary" data-bs-dismiss="modal">确定</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/jquery.min.js"></script>
+  <script src="js/bootstrap.min.js"></script>
+  <script src="js/tauri-api.js"></script>
+  <script src="js/icon-resolver.js"></script>
+  <script src="js/preview.js"></script>
+  <script src="js/tree.js"></script>
+  <script src="js/shortcuts.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
