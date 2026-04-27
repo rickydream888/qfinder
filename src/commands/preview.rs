@@ -28,6 +28,7 @@ const XLSX_LIMIT: u64 = 50 * 1024 * 1024;
 const PDF_LIMIT: u64 = 100 * 1024 * 1024;
 const DOCX_LIMIT: u64 = 20 * 1024 * 1024;
 const PPTX_LIMIT: u64 = 50 * 1024 * 1024;
+const EPUB_LIMIT: u64 = 200 * 1024 * 1024;
 
 const SPREADSHEET_MAX_ROWS: usize = 100;
 const SPREADSHEET_MAX_COLS: usize = 20;
@@ -134,6 +135,12 @@ fn preview_blocking(path: String) -> AppResult<PreviewPayload> {
                     _ => unreachable!(),
                 };
             }
+            "epub" => {
+                // EPUB 直接走 zip 解析提取封面（秒级、确定）。
+                // 不优先尝试 macOS Quick Look：qlmanage 对许多 epub
+                // 不会生成缩略图，要等 30s 超时才失败，造成「每次都重新生成」的体感。
+                return preview_epub(&p, size, &meta);
+            }
             _ => {}
         }
     }
@@ -155,7 +162,7 @@ fn preview_dir(p: &Path) -> AppResult<PreviewPayload> {
         }
     }
 
-    let total_size = du_size(p);
+    let total_size = if is_root_path(p) { None } else { du_size(p) };
     Ok(PreviewPayload::Directory {
         sub_dirs,
         sub_files,
@@ -178,6 +185,30 @@ fn du_size(p: &Path) -> Option<u64> {
     let first = stdout.split_whitespace().next()?;
     let kb: u64 = first.parse().ok()?;
     Some(kb.saturating_mul(1024))
+}
+
+/// 判断给定路径是否是文件树最根部的项（家目录、系统根、卷、盘符、iCloud 等）。
+/// 这些路径下 du 可能耗时极长甚至触发权限弹窗，统一不计算磁盘占用。
+fn is_root_path(p: &Path) -> bool {
+    // 1) 文件系统根（"/" 或 Windows 下的盘符根）
+    if p.parent().is_none() {
+        return true;
+    }
+    // 2) 用户家目录
+    if let Some(home) = dirs::home_dir() {
+        if p == home {
+            return true;
+        }
+    }
+    // 3) 平台 list_roots 中声明的根（iCloud Drive / /Volumes/* / 可移动盘 等）
+    if let Ok(roots) = platform::list_roots() {
+        for r in roots {
+            if Path::new(&r.path) == p {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn preview_text(p: &Path, size: u64) -> AppResult<PreviewPayload> {
@@ -446,7 +477,7 @@ fn preview_pptx(p: &Path, size: u64, meta: &fs::Metadata) -> AppResult<PreviewPa
     if size > PPTX_LIMIT {
         return Ok(too_large(size, PPTX_LIMIT, "PPTX"));
     }
-    let cache_dir = std::env::temp_dir().join("qfinder-preview");
+    let cache_dir = preview_cache_root();
     if let Err(e) = fs::create_dir_all(&cache_dir) {
         return Ok(PreviewPayload::Unsupported {
             reason: format!("无法创建缓存目录：{}", e),
@@ -595,7 +626,7 @@ fn try_quicklook(p: &Path, size: u64, meta: &fs::Metadata) -> Option<PreviewPayl
     if !platform::has_command("qlmanage") {
         return None;
     }
-    let cache_dir = std::env::temp_dir().join("qfinder-preview");
+    let cache_dir = preview_cache_root();
     fs::create_dir_all(&cache_dir).ok()?;
     let key = cache_key_for(p, size, meta);
     let cached_png = cache_dir.join(format!("{}.png", key));
@@ -719,4 +750,303 @@ fn djb2_hash(data: &[u8]) -> u64 {
         h = h.wrapping_mul(33).wrapping_add(*b as u64);
     }
     h
+}
+
+/// 预览图缓存根目录（按平台持久化，文件未修改时跨重启复用）。
+///
+/// - macOS:   ~/Library/Caches/qfinder/preview
+/// - Linux:   $XDG_CACHE_HOME/qfinder/preview 或 ~/.cache/qfinder/preview
+/// - Windows: %LOCALAPPDATA%\qfinder\preview
+///
+/// 如果系统目录解析失败，退回到系统临时目录。
+fn preview_cache_root() -> PathBuf {
+    if let Some(base) = dirs::cache_dir() {
+        return base.join("qfinder").join("preview");
+    }
+    std::env::temp_dir().join("qfinder-preview")
+}
+
+// -----------------------------------------------------------------------------
+// EPUB cover preview
+// -----------------------------------------------------------------------------
+
+const EPUB_COVER_EXTS: &[&str] = &["jpg", "jpeg", "png", "gif", "webp", "svg"];
+
+fn preview_epub(p: &Path, size: u64, meta: &fs::Metadata) -> AppResult<PreviewPayload> {
+    if size > EPUB_LIMIT {
+        return Ok(too_large(size, EPUB_LIMIT, "EPUB"));
+    }
+    let cache_dir = preview_cache_root();
+    if let Err(e) = fs::create_dir_all(&cache_dir) {
+        return Ok(PreviewPayload::Unsupported {
+            reason: format!("无法创建缓存目录：{}", e),
+            size,
+        });
+    }
+    let key = cache_key_for(p, size, meta);
+
+    // 命中缓存
+    for ext in EPUB_COVER_EXTS {
+        let cand = cache_dir.join(format!("{}.cover.{}", key, ext));
+        if cand.exists() {
+            return Ok(PreviewPayload::OfficeImage {
+                image_path: platform::path_to_string(&cand),
+                size,
+                engine: "EPUB Cover".to_string(),
+            });
+        }
+    }
+
+    match extract_epub_cover(p, &cache_dir, &key) {
+        Ok(Some(path)) => Ok(PreviewPayload::OfficeImage {
+            image_path: platform::path_to_string(&path),
+            size,
+            engine: "EPUB Cover".to_string(),
+        }),
+        Ok(None) => Ok(PreviewPayload::Unsupported {
+            reason: "未在 EPUB 中找到封面图片".into(),
+            size,
+        }),
+        Err(e) => Ok(PreviewPayload::Unsupported {
+            reason: format!("解析 EPUB 失败：{}", e),
+            size,
+        }),
+    }
+}
+
+fn extract_epub_cover(
+    p: &Path,
+    cache_dir: &Path,
+    key: &str,
+) -> Result<Option<PathBuf>, String> {
+    use std::io::Read;
+
+    let f = fs::File::open(p).map_err(|e| e.to_string())?;
+    let mut zip = zip::ZipArchive::new(f).map_err(|e| e.to_string())?;
+
+    // 1) META-INF/container.xml -> rootfile full-path
+    let container = read_zip_to_string(&mut zip, "META-INF/container.xml")?;
+    let opf_path = extract_attr(&container, "rootfile", "full-path")
+        .ok_or_else(|| "container.xml 中缺少 rootfile/full-path".to_string())?;
+
+    let opf_dir = match opf_path.rfind('/') {
+        Some(i) => opf_path[..i].to_string(),
+        None => String::new(),
+    };
+
+    // 2) 解析 OPF，找封面 href
+    let opf = read_zip_to_string(&mut zip, &opf_path)?;
+    let Some(cover_href) = find_cover_href(&opf) else {
+        return Ok(None);
+    };
+
+    let full_href = if opf_dir.is_empty() {
+        cover_href
+    } else {
+        format!("{}/{}", opf_dir, cover_href)
+    };
+    let resolved = resolve_zip_path(&full_href);
+
+    // 3) 提取图片
+    let mut entry = zip
+        .by_name(&resolved)
+        .map_err(|e| format!("ZIP 中找不到 {}：{}", resolved, e))?;
+    let mut buf = Vec::with_capacity(entry.size().min(16 * 1024 * 1024) as usize);
+    entry.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    drop(entry);
+
+    let ext = Path::new(&resolved)
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_lowercase())
+        .unwrap_or_else(|| "img".to_string());
+    let out = cache_dir.join(format!("{}.cover.{}", key, ext));
+    fs::write(&out, &buf).map_err(|e| e.to_string())?;
+    Ok(Some(out))
+}
+
+fn read_zip_to_string<R: std::io::Read + std::io::Seek>(
+    zip: &mut zip::ZipArchive<R>,
+    name: &str,
+) -> Result<String, String> {
+    use std::io::Read;
+    let mut entry = zip
+        .by_name(name)
+        .map_err(|e| format!("读取 ZIP 条目 {} 失败：{}", name, e))?;
+    let mut s = String::new();
+    entry.read_to_string(&mut s).map_err(|e| e.to_string())?;
+    Ok(s)
+}
+
+/// 解析单个 XML 起始标签内部的属性列表（不含 `<tag` 与 `>`、可含尾随 `/`）。
+fn parse_xml_attrs(tag_inner: &str) -> Vec<(String, String)> {
+    let mut attrs = Vec::new();
+    let bytes = tag_inner.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b'/') {
+            i += 1;
+        }
+        let name_start = i;
+        while i < bytes.len()
+            && bytes[i] != b'='
+            && !bytes[i].is_ascii_whitespace()
+            && bytes[i] != b'/'
+        {
+            i += 1;
+        }
+        let name_end = i;
+        if name_end == name_start {
+            break;
+        }
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b'=' {
+            continue;
+        }
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let quote = bytes[i];
+        if quote != b'"' && quote != b'\'' {
+            break;
+        }
+        i += 1;
+        let val_start = i;
+        while i < bytes.len() && bytes[i] != quote {
+            i += 1;
+        }
+        let val_end = i;
+        if i < bytes.len() {
+            i += 1;
+        }
+        let name = std::str::from_utf8(&bytes[name_start..name_end])
+            .unwrap_or("")
+            .to_string();
+        let val = std::str::from_utf8(&bytes[val_start..val_end])
+            .unwrap_or("")
+            .to_string();
+        if !name.is_empty() {
+            attrs.push((name, val));
+        }
+    }
+    attrs
+}
+
+fn attr_value(attrs: &[(String, String)], name: &str) -> Option<String> {
+    let suffix = format!(":{}", name);
+    attrs
+        .iter()
+        .find(|(k, _)| k == name || k.ends_with(&suffix))
+        .map(|(_, v)| v.clone())
+}
+
+/// 在 XML 文本里寻找形如 `<tag ...>` 的第一个起始标签，并提取其某个属性。
+fn extract_attr(xml: &str, tag: &str, attr: &str) -> Option<String> {
+    for raw in iter_open_tags(xml, tag) {
+        let attrs = parse_xml_attrs(&raw);
+        if let Some(v) = attr_value(&attrs, attr) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// 迭代 XML 中所有名为 `tag` 的起始标签，返回 `<tag` 与 `>` 之间的内部串。
+fn iter_open_tags(xml: &str, tag: &str) -> Vec<String> {
+    let needle = format!("<{}", tag);
+    let mut out = Vec::new();
+    let mut rest = xml;
+    while let Some(s) = rest.find(&needle) {
+        let after = &rest[s + needle.len()..];
+        let next_ch = after.chars().next();
+        let is_tag_boundary = matches!(
+            next_ch,
+            Some(c) if c.is_ascii_whitespace() || c == '/' || c == '>'
+        );
+        if !is_tag_boundary {
+            rest = after;
+            continue;
+        }
+        let Some(end) = after.find('>') else { break };
+        out.push(after[..end].to_string());
+        rest = &after[end + 1..];
+    }
+    out
+}
+
+fn find_cover_href(opf: &str) -> Option<String> {
+    let items: Vec<Vec<(String, String)>> = iter_open_tags(opf, "item")
+        .into_iter()
+        .map(|s| parse_xml_attrs(&s))
+        .collect();
+
+    // 1) EPUB 3: properties 含 "cover-image"
+    for attrs in &items {
+        let props = attr_value(attrs, "properties").unwrap_or_default();
+        if props.split_ascii_whitespace().any(|t| t == "cover-image") {
+            if let Some(h) = attr_value(attrs, "href") {
+                return Some(h);
+            }
+        }
+    }
+
+    // 2) EPUB 2: <meta name="cover" content="cover-id"/>
+    if let Some(cover_id) = find_meta_cover_id(opf) {
+        for attrs in &items {
+            if attr_value(attrs, "id").as_deref() == Some(cover_id.as_str()) {
+                if let Some(h) = attr_value(attrs, "href") {
+                    return Some(h);
+                }
+            }
+        }
+    }
+
+    // 3) 兜底：id/href 含 "cover" 且 media-type 是图片
+    for attrs in &items {
+        let mt = attr_value(attrs, "media-type").unwrap_or_default();
+        if !mt.starts_with("image/") {
+            continue;
+        }
+        let id = attr_value(attrs, "id").unwrap_or_default().to_lowercase();
+        let href = attr_value(attrs, "href").unwrap_or_default();
+        if id.contains("cover") || href.to_lowercase().contains("cover") {
+            return Some(href);
+        }
+    }
+
+    None
+}
+
+fn find_meta_cover_id(opf: &str) -> Option<String> {
+    for raw in iter_open_tags(opf, "meta") {
+        let attrs = parse_xml_attrs(&raw);
+        if attr_value(&attrs, "name").as_deref() == Some("cover") {
+            if let Some(c) = attr_value(&attrs, "content") {
+                return Some(c);
+            }
+        }
+    }
+    None
+}
+
+/// 规范化 ZIP 内的相对路径（去掉 `./`、解析 `..`，保留 `/` 分隔符）。
+fn resolve_zip_path(p: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in p.split('/') {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." {
+            parts.pop();
+            continue;
+        }
+        parts.push(seg);
+    }
+    parts.join("/")
 }
